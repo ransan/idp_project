@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_client
 from app.database import get_db
-from app.models import APIKey, WebhookConfig
+from app.models import WebhookConfig
 from app.schemas import WebhookConfigRequest, WebhookConfigResponse
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
@@ -14,9 +14,9 @@ router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 async def configure_webhook(
     payload: WebhookConfigRequest,
     db: AsyncSession = Depends(get_db),
-    auth: APIKey = Depends(get_current_client),
+    client: dict = Depends(get_current_client),
 ):
-    client_id = auth.client_id
+    client_id = client["client_id"]
 
     # Upsert: update if exists, create if not
     result = await db.execute(
@@ -53,10 +53,10 @@ async def configure_webhook(
 @router.get("/", response_model=WebhookConfigResponse)
 async def get_webhook(
     db: AsyncSession = Depends(get_db),
-    auth: APIKey = Depends(get_current_client),
+    client: dict = Depends(get_current_client),
 ):
     result = await db.execute(
-        select(WebhookConfig).where(WebhookConfig.client_id == auth.client_id)
+        select(WebhookConfig).where(WebhookConfig.client_id == client["client_id"])
     )
     webhook = result.scalar_one_or_none()
     if not webhook:
@@ -73,10 +73,10 @@ async def get_webhook(
 @router.delete("/", status_code=204)
 async def delete_webhook(
     db: AsyncSession = Depends(get_db),
-    auth: APIKey = Depends(get_current_client),
+    client: dict = Depends(get_current_client),
 ):
     result = await db.execute(
-        select(WebhookConfig).where(WebhookConfig.client_id == auth.client_id)
+        select(WebhookConfig).where(WebhookConfig.client_id == client["client_id"])
     )
     webhook = result.scalar_one_or_none()
     if not webhook:

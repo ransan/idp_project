@@ -124,6 +124,7 @@ class WebhookConfigResponse(BaseModel):
 class APIKeyCreateRequest(BaseModel):
     client_id: str = Field(..., min_length=1, max_length=128)
     name: str | None = None
+    role: str = Field(default="member", pattern=r"^(member|admin)$")
     rate_limit: int = Field(default=100, ge=1, le=10000)
 
 
@@ -132,6 +133,8 @@ class APIKeyCreateResponse(BaseModel):
     client_id: str
     name: str | None
     raw_key: str  # only returned on creation
+    key_prefix: str
+    role: str
     rate_limit: int
 
     model_config = {"from_attributes": True}
@@ -141,11 +144,75 @@ class APIKeyResponse(BaseModel):
     id: uuid.UUID
     client_id: str
     name: str | None
+    key_prefix: str
+    role: str
     is_active: bool
     rate_limit: int
+    last_used_at: datetime | None = None
+    expires_at: datetime | None = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+# ---------- Client Admin ----------
+class ClientCreateRequest(BaseModel):
+    id: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-z0-9\-_]+$")
+    name: str = Field(..., min_length=1, max_length=256)
+    email: str = Field(..., max_length=256)
+    plan: str = Field(default="free", pattern=r"^(free|starter|pro)$")
+    rate_limit: int = Field(default=100, ge=1, le=100000)
+
+
+class ClientResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    plan: str
+    rate_limit: int
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------- User Admin ----------
+class UserCreateRequest(BaseModel):
+    email: str = Field(..., max_length=256)
+    password: str = Field(..., min_length=8, max_length=128)
+    client_id: str = Field(..., min_length=1, max_length=128)
+    name: str | None = None
+    role: str = Field(default="member", pattern=r"^(member|admin)$")
+
+
+class UserResponse(BaseModel):
+    id: uuid.UUID
+    client_id: str
+    email: str
+    name: str | None
+    role: str
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---------- Auth (Login / JWT) ----------
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
+    client_id: str
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
 
 
 # ---------- LLM Result (internal) ----------

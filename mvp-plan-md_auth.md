@@ -173,9 +173,13 @@ docpipeline/
 │   ├── main.py                 # FastAPI app, middleware, router registration
 │   ├── config.py               # Pydantic settings from .env
 │   ├── database.py             # SQLAlchemy async engine + session
-│   ├── models.py               # Document model (status, category, extracted_data)
+│   ├── models.py               # Document, Client, ApiKey, User models
 │   ├── schemas.py              # Pydantic request/response schemas
 │   ├── tasks.py                # Celery task definitions
+│   ├── middleware/
+│   │   ├── __init__.py
+│   │   ├── auth.py             # API key + JWT auth dependency
+│   │   └── rate_limit.py       # Per-client Redis sliding window
 │   ├── services/
 │   │   ├── __init__.py
 │   │   ├── parser.py           # PDF, DOCX, OCR text extraction
@@ -183,18 +187,24 @@ docpipeline/
 │   │   └── pipeline.py         # Orchestrates parse → LLM → store
 │   └── routers/
 │       ├── __init__.py
+│       ├── auth.py             # Login, refresh, password reset
+│       ├── admin.py            # Client + API key management (admin only)
 │       ├── documents.py        # Upload, list, get, reprocess endpoints
 │       └── webhooks.py         # Callback notification endpoints
 ├── frontend/                   # React dashboard (Week 5)
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── components/
+│   │   │   ├── LoginPage.jsx
 │   │   │   ├── UploadZone.jsx
 │   │   │   ├── DocumentList.jsx
 │   │   │   └── DocumentDetail.jsx
+│   │   ├── hooks/
+│   │   │   └── useAuth.js      # JWT token storage + refresh
 │   │   └── api.js
 │   └── package.json
 ├── tests/
+│   ├── test_auth.py
 │   ├── test_parser.py
 │   ├── test_llm.py
 │   ├── test_pipeline.py
@@ -518,7 +528,334 @@ Given raw document text, return ONLY valid JSON with:
 
 ---
 
-## 9. Post-MVP Roadmap (Months 3–6)
+## 9. Authentication & Authorization
+
+### 9.1 Auth Strategy Overview
+
+The MVP uses a **two-layer auth model** designed for B2B SaaS:
+
+| Access Method | Auth Type | Use Case |
+|---|---|---|
+| **REST API** (programmatic) | API Key in header | Client systems posting documents, polling results, webhooks |
+| **Dashboard UI** (browser) | JWT Bearer token | Paralegals, analysts, managers viewing results in the browser |
+| **Admin endpoints** | API Key + admin role | Creating clients, revoking keys, viewing usage stats |
+
+Both methods resolve to a `client_id` — this is the tenant boundary. Every database query is scoped to this ID so clients never see each other's documents.
+
+### 9.2 How API Key Auth Works
+
+```
+Client Request                        FastAPI Server
+─────────────                         ──────────────
+                                      
+POST /api/v1/documents/upload         1. Extract X-API-Key header
+Headers:                              2. Hash the key (SHA-256)
+  X-API-Key: dp_live_a1b2c3d4...  ──▶ 3. Look up hash in api_keys table
+  Content-Type: multipart/form-data   4. Check: is_active? rate_limit?
+Body: invoice.pdf                     5. Attach client_id to request state
+                                      6. All downstream queries filter
+                                         by this client_id
+```
+
+**Key format:** `dp_live_` prefix (production) or `dp_test_` prefix (sandbox), followed by 32 random hex characters. Example: `dp_live_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6`
+
+**Storage:** Only the SHA-256 hash is stored in the database. The plaintext key is shown once at creation time and never stored — same pattern as Stripe/GitHub API keys.
+
+### 9.3 How JWT Auth Works (Dashboard)
+
+```
+Login Flow                            Token Usage
+──────────                            ───────────
+
+POST /api/v1/auth/login               GET /api/v1/documents/
+{                                     Headers:
+  "email": "sarah@lawfirm.com",         Authorization: Bearer eyJhbG...
+  "password": "••••••••"              
+}                                     1. Decode JWT
+      │                               2. Verify signature + expiry
+      ▼                               3. Extract client_id from payload
+200 OK                                4. Scope all queries to client_id
+{
+  "access_token": "eyJhbG...",
+  "token_type": "bearer",
+  "expires_in": 3600,
+  "client_id": "lawfirm-abc"
+}
+```
+
+**JWT payload:**
+```json
+{
+  "sub": "user-uuid-here",
+  "client_id": "lawfirm-abc",
+  "role": "member",
+  "exp": 1714000000,
+  "iat": 1713996400
+}
+```
+
+### 9.4 Database Schema (Auth Tables)
+
+```sql
+-- Clients / Tenants
+CREATE TABLE clients (
+    id              VARCHAR(128) PRIMARY KEY,  -- e.g. "lawfirm-abc"
+    name            VARCHAR(256) NOT NULL,      -- "Smith & Associates LLP"
+    email           VARCHAR(256) NOT NULL,
+    plan            VARCHAR(64) DEFAULT 'free', -- free | starter | pro
+    rate_limit      INTEGER DEFAULT 100,        -- max docs per hour
+    is_active       BOOLEAN DEFAULT true,
+    webhook_url     VARCHAR(1024),              -- optional callback URL
+    webhook_secret  VARCHAR(256),               -- HMAC signing secret
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+-- API Keys (for programmatic access)
+CREATE TABLE api_keys (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id       VARCHAR(128) REFERENCES clients(id) ON DELETE CASCADE,
+    key_hash        VARCHAR(64) NOT NULL UNIQUE,  -- SHA-256 of the key
+    key_prefix      VARCHAR(16) NOT NULL,          -- "dp_live_a1b2" for display
+    name            VARCHAR(256),                  -- "Production Key", "CI/CD"
+    role            VARCHAR(32) DEFAULT 'member',  -- member | admin
+    is_active       BOOLEAN DEFAULT true,
+    last_used_at    TIMESTAMPTZ,
+    expires_at      TIMESTAMPTZ,                   -- optional expiry
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE INDEX idx_api_keys_hash ON api_keys(key_hash);
+
+-- Dashboard Users (for JWT login)
+CREATE TABLE users (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    client_id       VARCHAR(128) REFERENCES clients(id) ON DELETE CASCADE,
+    email           VARCHAR(256) NOT NULL UNIQUE,
+    password_hash   VARCHAR(256) NOT NULL,  -- bcrypt
+    name            VARCHAR(256),
+    role            VARCHAR(32) DEFAULT 'member',  -- member | admin
+    is_active       BOOLEAN DEFAULT true,
+    last_login_at   TIMESTAMPTZ,
+    created_at      TIMESTAMPTZ DEFAULT now()
+);
+```
+
+### 9.5 Middleware Implementation
+
+```python
+# app/middleware/auth.py
+
+import hashlib
+from fastapi import Request, HTTPException, Depends
+from fastapi.security import APIKeyHeader, HTTPBearer
+from sqlalchemy import select
+from jose import jwt, JWTError
+from app.config import get_settings
+from app.database import get_db
+from app.models import ApiKey, User
+
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def hash_api_key(key: str) -> str:
+    """One-way hash — the plaintext key is never stored."""
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+async def get_current_client(
+    request: Request,
+    api_key: str = Depends(api_key_header),
+    bearer = Depends(bearer_scheme),
+    db = Depends(get_db),
+) -> dict:
+    """
+    Resolves the authenticated client from EITHER:
+      - X-API-Key header (programmatic access)
+      - Bearer JWT token (dashboard access)
+    
+    Returns: {"client_id": "...", "role": "member|admin", "method": "api_key|jwt"}
+    """
+    
+    # --- Path 1: API Key ---
+    if api_key:
+        key_hash = hash_api_key(api_key)
+        stmt = select(ApiKey).where(
+            ApiKey.key_hash == key_hash,
+            ApiKey.is_active == True,
+        )
+        result = await db.execute(stmt)
+        key_record = result.scalar_one_or_none()
+
+        if not key_record:
+            raise HTTPException(401, "Invalid API key")
+        if key_record.expires_at and key_record.expires_at < now():
+            raise HTTPException(401, "API key expired")
+
+        # Update last_used timestamp (fire-and-forget)
+        key_record.last_used_at = datetime.now(timezone.utc)
+        await db.commit()
+
+        return {
+            "client_id": key_record.client_id,
+            "role": key_record.role,
+            "method": "api_key",
+        }
+
+    # --- Path 2: JWT Bearer Token ---
+    if bearer:
+        try:
+            payload = jwt.decode(
+                bearer.credentials,
+                get_settings().jwt_secret,
+                algorithms=["HS256"],
+            )
+            return {
+                "client_id": payload["client_id"],
+                "role": payload.get("role", "member"),
+                "method": "jwt",
+            }
+        except JWTError:
+            raise HTTPException(401, "Invalid or expired token")
+
+    # --- No credentials provided ---
+    raise HTTPException(
+        401,
+        detail="Authentication required. Provide X-API-Key header or Bearer token.",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def require_admin(client: dict = Depends(get_current_client)):
+    """Dependency that enforces admin role."""
+    if client["role"] != "admin":
+        raise HTTPException(403, "Admin access required")
+    return client
+```
+
+### 9.6 How Endpoints Use Auth
+
+```python
+# app/routers/documents.py
+
+@router.post("/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    client: dict = Depends(get_current_client),  # ← auth injected
+    db: AsyncSession = Depends(get_db),
+):
+    # client["client_id"] is guaranteed to be set
+    doc = Document(
+        client_id=client["client_id"],  # ← tenant scoping
+        filename=stored_name,
+        ...
+    )
+
+@router.get("/")
+async def list_documents(
+    client: dict = Depends(get_current_client),  # ← auth injected
+    db: AsyncSession = Depends(get_db),
+):
+    # EVERY query is scoped — no cross-tenant leakage
+    stmt = select(Document).where(
+        Document.client_id == client["client_id"]  # ← always filtered
+    )
+
+
+# Admin-only endpoints
+@router.post("/clients")
+async def create_client(
+    body: CreateClientRequest,
+    admin: dict = Depends(require_admin),  # ← only admins
+    db: AsyncSession = Depends(get_db),
+):
+    ...
+```
+
+### 9.7 Auth Endpoints
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/login` | None (public) | Email + password → JWT token |
+| `POST` | `/api/v1/auth/refresh` | JWT | Refresh an expiring token |
+| `POST` | `/api/v1/admin/clients` | API Key (admin) | Create a new client/tenant |
+| `POST` | `/api/v1/admin/clients/{id}/api-keys` | API Key (admin) | Generate a new API key for a client |
+| `DELETE` | `/api/v1/admin/api-keys/{id}` | API Key (admin) | Revoke an API key |
+| `GET` | `/api/v1/admin/clients/{id}/usage` | API Key (admin) | View usage stats for a client |
+
+### 9.8 Rate Limiting Per Client
+
+```python
+# app/middleware/rate_limit.py
+
+from datetime import datetime, timezone
+import redis.asyncio as redis
+from app.config import get_settings
+
+r = redis.from_url(get_settings().redis_url)
+
+async def check_rate_limit(client_id: str, limit: int = 100):
+    """
+    Sliding window: max {limit} documents per hour per client.
+    Uses Redis sorted sets for efficient counting.
+    """
+    key = f"ratelimit:{client_id}"
+    now = datetime.now(timezone.utc).timestamp()
+    window = 3600  # 1 hour
+
+    pipe = r.pipeline()
+    pipe.zremrangebyscore(key, 0, now - window)  # prune old
+    pipe.zadd(key, {str(now): now})               # add current
+    pipe.zcard(key)                                # count
+    pipe.expire(key, window)                       # auto-cleanup
+    results = await pipe.execute()
+
+    count = results[2]
+    if count > limit:
+        raise HTTPException(
+            429,
+            detail=f"Rate limit exceeded. Max {limit} docs/hour.",
+            headers={"Retry-After": "60"},
+        )
+```
+
+### 9.9 Security Checklist
+
+- [ ] API keys are hashed (SHA-256) before storage — plaintext shown only at creation
+- [ ] JWT tokens expire in 1 hour, refresh tokens in 7 days
+- [ ] Passwords hashed with bcrypt (cost factor 12)
+- [ ] All queries scoped by `client_id` — no endpoint returns unscoped data
+- [ ] Rate limiting per client via Redis sliding window
+- [ ] HTTPS enforced in production (nginx + Let's Encrypt)
+- [ ] CORS locked to specific dashboard domain in production
+- [ ] API key prefix (`dp_live_a1b2`) stored for display — never the full key
+- [ ] Admin endpoints require explicit `role: admin` check
+- [ ] Failed login attempts logged for monitoring (future: lockout after 5 failures)
+
+### 9.10 Onboarding Flow (How a New Client Gets Access)
+
+```
+1. Admin creates client
+   POST /api/v1/admin/clients
+   { "id": "lawfirm-abc", "name": "Smith & Associates", "email": "..." }
+
+2. Admin generates API key
+   POST /api/v1/admin/clients/lawfirm-abc/api-keys
+   { "name": "Production Key" }
+   → Response (SHOWN ONCE):
+   { "api_key": "dp_live_a1b2c3d4...", "prefix": "dp_live_a1b2" }
+
+3. Admin creates dashboard user (optional)
+   POST /api/v1/admin/users
+   { "email": "sarah@lawfirm.com", "client_id": "lawfirm-abc", "password": "..." }
+
+4. Client uses API key in headers for programmatic access
+   OR logs into dashboard with email/password for UI access
+```
+
+---
+
+## 10. Post-MVP Roadmap (Months 3–6)
 
 Once the beta is stable and you have client feedback:
 
@@ -532,7 +869,7 @@ Once the beta is stable and you have client feedback:
 
 ---
 
-## 10. Cost Breakdown
+## 11. Cost Breakdown
 
 ### Monthly operating costs (MVP)
 
@@ -562,19 +899,23 @@ Once the beta is stable and you have client feedback:
 
 ---
 
-## 11. Key Files Reference
+## 12. Key Files Reference
 
 | File | Purpose |
 |---|---|
 | `app/main.py` | FastAPI app entry point, middleware, router registration |
 | `app/config.py` | Environment variable management via Pydantic Settings |
-| `app/models.py` | SQLAlchemy document model with status/category enums |
+| `app/models.py` | SQLAlchemy models: Document, Client, ApiKey, User |
 | `app/schemas.py` | Request/response Pydantic models |
 | `app/database.py` | Async SQLAlchemy engine and session factory |
+| `app/middleware/auth.py` | API key hashing, JWT decode, `get_current_client` dependency |
+| `app/middleware/rate_limit.py` | Redis sliding window rate limiter per client |
 | `app/services/parser.py` | PDF, DOCX, and OCR text extraction |
 | `app/services/llm.py` | Claude API integration with structured prompt |
 | `app/services/pipeline.py` | Orchestrates parse → LLM → store with error handling |
 | `app/tasks.py` | Celery async task definitions |
+| `app/routers/auth.py` | Login, token refresh, password reset |
+| `app/routers/admin.py` | Client creation, API key management (admin only) |
 | `app/routers/documents.py` | All document CRUD and upload endpoints |
 | `docker-compose.yml` | Full stack: API, worker, PostgreSQL, Redis |
 | `Dockerfile` | Python 3.12 + Tesseract OCR |

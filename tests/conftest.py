@@ -14,7 +14,8 @@ from sqlalchemy import String, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.types import JSON, TypeDecorator
 
-from app.models import Base, DocStatus, Document
+from app.auth import generate_api_key, hash_api_key, hash_password, create_access_token
+from app.models import APIKey, Base, Client, DocStatus, Document, User
 
 # ---------------------------------------------------------------------------
 # SQLite compatibility: Replace PostgreSQL-specific types for testing
@@ -105,12 +106,67 @@ async def db_session(db_engine):
 
 
 # ---------------------------------------------------------------------------
+# Auth seed data
+# ---------------------------------------------------------------------------
+TEST_CLIENT_ID = "test-client"
+TEST_RAW_API_KEY = "dp_live_000000000000000000000000deadbeef"
+TEST_ADMIN_RAW_KEY = "dp_live_000000000000000000000000cafebabe"
+TEST_USER_EMAIL = "testuser@example.com"
+TEST_USER_PASSWORD = "testpassword123"
+
+
+async def _seed_auth_data(session: AsyncSession):
+    """Create a Client, API keys (member + admin), and a User for tests."""
+    client_record = Client(
+        id=TEST_CLIENT_ID,
+        name="Test Client",
+        email="client@example.com",
+        plan="free",
+        rate_limit=1000,
+    )
+    session.add(client_record)
+
+    member_key = APIKey(
+        key_hash=hash_api_key(TEST_RAW_API_KEY),
+        key_prefix=TEST_RAW_API_KEY[:12],
+        client_id=TEST_CLIENT_ID,
+        name="Test Key",
+        role="member",
+    )
+    session.add(member_key)
+
+    admin_key = APIKey(
+        key_hash=hash_api_key(TEST_ADMIN_RAW_KEY),
+        key_prefix=TEST_ADMIN_RAW_KEY[:12],
+        client_id=TEST_CLIENT_ID,
+        name="Admin Key",
+        role="admin",
+    )
+    session.add(admin_key)
+
+    user = User(
+        client_id=TEST_CLIENT_ID,
+        email=TEST_USER_EMAIL,
+        password_hash=hash_password(TEST_USER_PASSWORD),
+        name="Test User",
+        role="admin",
+    )
+    session.add(user)
+
+    await session.commit()
+
+
+# ---------------------------------------------------------------------------
 # FastAPI test client
 # ---------------------------------------------------------------------------
 @pytest_asyncio.fixture
 async def client(db_engine):
-    """Create a test client with overridden DB dependency and mocked Celery tasks."""
+    """Create a test client with overridden DB dependency, mocked Celery tasks, and auth seed data."""
     session_factory = async_sessionmaker(db_engine, class_=AsyncSession, expire_on_commit=False)
+
+    # Seed auth data
+    async with session_factory() as seed_session:
+        await _seed_auth_data(seed_session)
 
     async def override_get_db():
         async with session_factory() as session:
@@ -139,6 +195,21 @@ async def client(db_engine):
             yield ac
 
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Auth header helpers
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def auth_headers():
+    """Headers with a member API key."""
+    return {"X-API-Key": TEST_RAW_API_KEY}
+
+
+@pytest.fixture
+def admin_headers():
+    """Headers with an admin API key."""
+    return {"X-API-Key": TEST_ADMIN_RAW_KEY}
 
 
 # ---------------------------------------------------------------------------

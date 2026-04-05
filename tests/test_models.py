@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 import pytest_asyncio
 
-from app.models import APIKey, Base, DocCategory, DocStatus, Document, WebhookConfig
+from app.models import APIKey, Base, Client, DocCategory, DocStatus, Document, WebhookConfig
 
 
 class TestDocStatusEnum:
@@ -114,9 +114,19 @@ class TestDocumentModel:
 class TestAPIKeyModel:
     @pytest.mark.asyncio
     async def test_create_api_key(self, db_session):
+        # API key requires a Client (FK)
+        client = Client(
+            id="test-models-client",
+            name="Test",
+            email="t@t.com",
+        )
+        db_session.add(client)
+        await db_session.flush()
+
         key = APIKey(
             key_hash="hashed_value_here",
-            client_id="test_client",
+            key_prefix="dp_live_abcd",
+            client_id="test-models-client",
             name="Test Key",
             rate_limit=50,
         )

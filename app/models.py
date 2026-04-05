@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Enum,
     Float,
+    ForeignKey,
     Integer,
     String,
     Text,
@@ -21,6 +22,7 @@ class Base(DeclarativeBase):
     pass
 
 
+# ---------- Enums ----------
 class DocStatus(str, enum.Enum):
     UPLOADED = "uploaded"
     PARSING = "parsing"
@@ -39,6 +41,70 @@ class DocCategory(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
+# ---------- Client / Tenant ----------
+class Client(Base):
+    __tablename__ = "clients"
+
+    id = Column(String(128), primary_key=True)  # slug e.g. "lawfirm-abc"
+    name = Column(String(256), nullable=False)
+    email = Column(String(256), nullable=False)
+    plan = Column(String(64), default="free")
+    rate_limit = Column(Integer, default=100)  # max docs per hour
+    is_active = Column(Boolean, default=True, nullable=False)
+    webhook_url = Column(String(1024), nullable=True)
+    webhook_secret = Column(String(256), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+# ---------- API Key ----------
+class APIKey(Base):
+    __tablename__ = "api_keys"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id = Column(String(128), ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    key_hash = Column(String(64), nullable=False, unique=True)  # SHA-256 hex digest
+    key_prefix = Column(String(16), nullable=False)  # e.g. "dp_live_a1b2"
+    name = Column(String(256), nullable=True)
+    role = Column(String(32), default="member", nullable=False)  # member | admin
+    is_active = Column(Boolean, default=True, nullable=False)
+    rate_limit = Column(Integer, default=100)
+    last_used_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("idx_api_keys_hash", "key_hash"),
+    )
+
+
+# ---------- Dashboard User ----------
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id = Column(String(128), ForeignKey("clients.id", ondelete="CASCADE"), nullable=False)
+    email = Column(String(256), nullable=False, unique=True)
+    password_hash = Column(String(256), nullable=False)  # bcrypt
+    name = Column(String(256), nullable=True)
+    role = Column(String(32), default="member", nullable=False)  # member | admin
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+# ---------- Document ----------
 class Document(Base):
     __tablename__ = "documents"
 
@@ -73,7 +139,7 @@ class Document(Base):
     flags = Column(JSONB, nullable=True)
 
     # Multi-tenancy
-    client_id = Column(String(128), nullable=True)
+    client_id = Column(String(128), ForeignKey("clients.id", ondelete="SET NULL"), nullable=True)
     tags = Column(JSONB, default=list)
 
     # Timestamps
@@ -93,22 +159,7 @@ class Document(Base):
     )
 
 
-class APIKey(Base):
-    __tablename__ = "api_keys"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    key_hash = Column(String(256), nullable=False, unique=True)
-    client_id = Column(String(128), nullable=False)
-    name = Column(String(256), nullable=True)
-    is_active = Column(Boolean, default=True, nullable=False)
-    rate_limit = Column(Integer, default=100)  # requests per minute
-    created_at = Column(
-        DateTime(timezone=True),
-        default=lambda: datetime.now(timezone.utc),
-        nullable=False,
-    )
-
-
+# ---------- Webhook Config ----------
 class WebhookConfig(Base):
     __tablename__ = "webhook_configs"
 

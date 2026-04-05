@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     MINIO_BUCKET: str = "idp-documents"
     MINIO_SECURE: bool = False
 
+    # JWT Authentication
+    JWT_SECRET_KEY: str = "change-me-in-production-use-a-long-random-string"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
     # Webhook
     WEBHOOK_TIMEOUT_SECONDS: int = 30
 

@@ -14,6 +14,7 @@ from app.database import dispose_engine, get_db
 from app.models import Document
 from app.routers import documents, webhooks
 from app.routers.admin import router as admin_router
+from app.routers.auth_router import router as auth_router
 from app.schemas import (
     CategoryCount,
     HealthResponse,
@@ -73,6 +74,7 @@ app.state.limiter = limiter
 app.include_router(documents.router)
 app.include_router(webhooks.router)
 app.include_router(admin_router)
+app.include_router(auth_router)
 
 
 @app.get("/health", response_model=HealthResponse, tags=["system"])

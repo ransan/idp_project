@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import generate_api_key, hash_api_key
 from app.models import APIKey, DocCategory, DocStatus, Document
+from tests.conftest import TEST_CLIENT_ID, TEST_RAW_API_KEY, TEST_ADMIN_RAW_KEY
 
 
 # ---------------------------------------------------------------------------
@@ -21,7 +22,7 @@ async def _seed_document(db_session, **kwargs):
         "mime_type": "application/pdf",
         "storage_path": f"/tmp/{uuid.uuid4()}.pdf",
         "status": DocStatus.UPLOADED,
-        "client_id": "test_client",
+        "client_id": TEST_CLIENT_ID,
     }
     defaults.update(kwargs)
     doc = Document(**defaults)
@@ -57,11 +58,11 @@ class TestStatsEndpoint:
 # ---------------------------------------------------------------------------
 class TestUploadEndpoint:
     @pytest.mark.asyncio
-    async def test_upload_valid_pdf(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_upload_valid_pdf(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         resp = await client.post(
             "/api/v1/documents/upload",
             files={"file": ("invoice.pdf", sample_pdf_bytes, "application/pdf")},
-            params={"client_id": "test"},
+            headers=auth_headers,
         )
         assert resp.status_code == 201
         data = resp.json()
@@ -70,7 +71,7 @@ class TestUploadEndpoint:
         assert "id" in data
 
     @pytest.mark.asyncio
-    async def test_upload_valid_docx(self, client, sample_docx_bytes, tmp_upload_dir):
+    async def test_upload_valid_docx(self, client, sample_docx_bytes, tmp_upload_dir, auth_headers):
         resp = await client.post(
             "/api/v1/documents/upload",
             files={
@@ -80,19 +81,21 @@ class TestUploadEndpoint:
                     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 )
             },
+            headers=auth_headers,
         )
         assert resp.status_code == 201
 
     @pytest.mark.asyncio
-    async def test_upload_invalid_file_type(self, client, tmp_upload_dir):
+    async def test_upload_invalid_file_type(self, client, tmp_upload_dir, auth_headers):
         resp = await client.post(
             "/api/v1/documents/upload",
             files={"file": ("script.py", b"print('hi')", "text/x-python")},
+            headers=auth_headers,
         )
         assert resp.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_upload_file_too_large(self, client, tmp_upload_dir):
+    async def test_upload_file_too_large(self, client, tmp_upload_dir, auth_headers):
         from app.config import settings
 
         original = settings.MAX_FILE_SIZE_MB
@@ -102,47 +105,56 @@ class TestUploadEndpoint:
             resp = await client.post(
                 "/api/v1/documents/upload",
                 files={"file": ("test.pdf", b"x" * 100, "application/pdf")},
+                headers=auth_headers,
             )
             assert resp.status_code == 413
         finally:
             object.__setattr__(settings, "MAX_FILE_SIZE_MB", original)
 
     @pytest.mark.asyncio
-    async def test_upload_no_file(self, client):
-        resp = await client.post("/api/v1/documents/upload")
+    async def test_upload_no_file(self, client, auth_headers):
+        resp = await client.post("/api/v1/documents/upload", headers=auth_headers)
         assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_upload_no_auth(self, client, sample_pdf_bytes, tmp_upload_dir):
+        resp = await client.post(
+            "/api/v1/documents/upload",
+            files={"file": ("test.pdf", sample_pdf_bytes, "application/pdf")},
+        )
+        assert resp.status_code == 401
 
 
 class TestBatchUploadEndpoint:
     @pytest.mark.asyncio
-    async def test_batch_upload(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_batch_upload(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         files = [
             ("files", (f"doc{i}.pdf", sample_pdf_bytes, "application/pdf"))
             for i in range(3)
         ]
-        resp = await client.post("/api/v1/documents/upload/batch", files=files)
+        resp = await client.post("/api/v1/documents/upload/batch", files=files, headers=auth_headers)
         assert resp.status_code == 201
         data = resp.json()
         assert data["total"] == 3
         assert len(data["documents"]) == 3
 
     @pytest.mark.asyncio
-    async def test_batch_upload_exceeds_max(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_batch_upload_exceeds_max(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         with patch("app.routers.documents.settings.MAX_BATCH_SIZE", 2):
             files = [
                 ("files", (f"doc{i}.pdf", sample_pdf_bytes, "application/pdf"))
                 for i in range(3)
             ]
-            resp = await client.post("/api/v1/documents/upload/batch", files=files)
+            resp = await client.post("/api/v1/documents/upload/batch", files=files, headers=auth_headers)
             assert resp.status_code == 400
 
     @pytest.mark.asyncio
-    async def test_batch_upload_mixed_valid_invalid(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_batch_upload_mixed_valid_invalid(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         files = [
             ("files", ("valid.pdf", sample_pdf_bytes, "application/pdf")),
             ("files", ("bad.py", b"import os", "text/x-python")),
         ]
-        resp = await client.post("/api/v1/documents/upload/batch", files=files)
+        resp = await client.post("/api/v1/documents/upload/batch", files=files, headers=auth_headers)
         # Should reject because one file is invalid
         assert resp.status_code == 400
 
@@ -152,24 +164,25 @@ class TestBatchUploadEndpoint:
 # ---------------------------------------------------------------------------
 class TestGetDocumentEndpoint:
     @pytest.mark.asyncio
-    async def test_get_existing_document(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_get_existing_document(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         # First upload
         upload_resp = await client.post(
             "/api/v1/documents/upload",
             files={"file": ("test.pdf", sample_pdf_bytes, "application/pdf")},
+            headers=auth_headers,
         )
         doc_id = upload_resp.json()["id"]
 
-        resp = await client.get(f"/api/v1/documents/{doc_id}")
+        resp = await client.get(f"/api/v1/documents/{doc_id}", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["id"] == doc_id
         assert data["status"] == "uploaded"
 
     @pytest.mark.asyncio
-    async def test_get_nonexistent_document(self, client):
+    async def test_get_nonexistent_document(self, client, auth_headers):
         fake_id = str(uuid.uuid4())
-        resp = await client.get(f"/api/v1/documents/{fake_id}")
+        resp = await client.get(f"/api/v1/documents/{fake_id}", headers=auth_headers)
         assert resp.status_code == 404
 
 
@@ -178,37 +191,39 @@ class TestGetDocumentEndpoint:
 # ---------------------------------------------------------------------------
 class TestListDocumentsEndpoint:
     @pytest.mark.asyncio
-    async def test_list_empty(self, client):
-        resp = await client.get("/api/v1/documents/")
+    async def test_list_empty(self, client, auth_headers):
+        resp = await client.get("/api/v1/documents/", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 0
         assert data["documents"] == []
 
     @pytest.mark.asyncio
-    async def test_list_with_documents(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_list_with_documents(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         # Upload 2 docs
         for i in range(2):
             await client.post(
                 "/api/v1/documents/upload",
                 files={"file": (f"doc{i}.pdf", sample_pdf_bytes, "application/pdf")},
+                headers=auth_headers,
             )
 
-        resp = await client.get("/api/v1/documents/")
+        resp = await client.get("/api/v1/documents/", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["total"] == 2
         assert len(data["documents"]) == 2
 
     @pytest.mark.asyncio
-    async def test_list_pagination(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_list_pagination(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         for i in range(5):
             await client.post(
                 "/api/v1/documents/upload",
                 files={"file": (f"doc{i}.pdf", sample_pdf_bytes, "application/pdf")},
+                headers=auth_headers,
             )
 
-        resp = await client.get("/api/v1/documents/", params={"page": 1, "size": 2})
+        resp = await client.get("/api/v1/documents/", params={"page": 1, "size": 2}, headers=auth_headers)
         data = resp.json()
         assert data["total"] == 5
         assert len(data["documents"]) == 2
@@ -216,16 +231,17 @@ class TestListDocumentsEndpoint:
         assert data["size"] == 2
 
     @pytest.mark.asyncio
-    async def test_list_filter_by_status(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_list_filter_by_status(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         await client.post(
             "/api/v1/documents/upload",
             files={"file": ("doc.pdf", sample_pdf_bytes, "application/pdf")},
+            headers=auth_headers,
         )
-        resp = await client.get("/api/v1/documents/", params={"status": "uploaded"})
+        resp = await client.get("/api/v1/documents/", params={"status": "uploaded"}, headers=auth_headers)
         data = resp.json()
         assert data["total"] >= 1
 
-        resp2 = await client.get("/api/v1/documents/", params={"status": "completed"})
+        resp2 = await client.get("/api/v1/documents/", params={"status": "completed"}, headers=auth_headers)
         data2 = resp2.json()
         assert data2["total"] == 0
 
@@ -235,23 +251,24 @@ class TestListDocumentsEndpoint:
 # ---------------------------------------------------------------------------
 class TestReprocessEndpoint:
     @pytest.mark.asyncio
-    async def test_reprocess_existing(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_reprocess_existing(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         upload_resp = await client.post(
             "/api/v1/documents/upload",
             files={"file": ("test.pdf", sample_pdf_bytes, "application/pdf")},
+            headers=auth_headers,
         )
         doc_id = upload_resp.json()["id"]
 
-        resp = await client.post(f"/api/v1/documents/{doc_id}/reprocess")
+        resp = await client.post(f"/api/v1/documents/{doc_id}/reprocess", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "uploaded"
         assert "reprocessing" in data["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_reprocess_nonexistent(self, client):
+    async def test_reprocess_nonexistent(self, client, auth_headers):
         fake_id = str(uuid.uuid4())
-        resp = await client.post(f"/api/v1/documents/{fake_id}/reprocess")
+        resp = await client.post(f"/api/v1/documents/{fake_id}/reprocess", headers=auth_headers)
         assert resp.status_code == 404
 
 
@@ -260,24 +277,25 @@ class TestReprocessEndpoint:
 # ---------------------------------------------------------------------------
 class TestDeleteEndpoint:
     @pytest.mark.asyncio
-    async def test_delete_existing(self, client, sample_pdf_bytes, tmp_upload_dir):
+    async def test_delete_existing(self, client, sample_pdf_bytes, tmp_upload_dir, auth_headers):
         upload_resp = await client.post(
             "/api/v1/documents/upload",
             files={"file": ("test.pdf", sample_pdf_bytes, "application/pdf")},
+            headers=auth_headers,
         )
         doc_id = upload_resp.json()["id"]
 
-        resp = await client.delete(f"/api/v1/documents/{doc_id}")
+        resp = await client.delete(f"/api/v1/documents/{doc_id}", headers=auth_headers)
         assert resp.status_code == 204
 
         # Verify it's gone
-        get_resp = await client.get(f"/api/v1/documents/{doc_id}")
+        get_resp = await client.get(f"/api/v1/documents/{doc_id}", headers=auth_headers)
         assert get_resp.status_code == 404
 
     @pytest.mark.asyncio
-    async def test_delete_nonexistent(self, client):
+    async def test_delete_nonexistent(self, client, auth_headers):
         fake_id = str(uuid.uuid4())
-        resp = await client.delete(f"/api/v1/documents/{fake_id}")
+        resp = await client.delete(f"/api/v1/documents/{fake_id}", headers=auth_headers)
         assert resp.status_code == 404
 
 
@@ -286,43 +304,136 @@ class TestDeleteEndpoint:
 # ---------------------------------------------------------------------------
 class TestAdminAPIKeyEndpoints:
     @pytest.mark.asyncio
-    async def test_create_api_key(self, client):
+    async def test_create_api_key(self, client, admin_headers):
         resp = await client.post(
             "/api/v1/admin/api-keys",
-            json={"client_id": "new_client", "name": "Test Key"},
+            json={"client_id": TEST_CLIENT_ID, "name": "Test Key"},
+            headers=admin_headers,
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["client_id"] == "new_client"
+        assert data["client_id"] == TEST_CLIENT_ID
         assert "raw_key" in data
-        assert data["raw_key"].startswith("idp_")
+        assert data["raw_key"].startswith("dp_live_")
 
     @pytest.mark.asyncio
-    async def test_list_api_keys(self, client):
-        # Create one first
-        await client.post(
+    async def test_create_api_key_nonexistent_client(self, client, admin_headers):
+        resp = await client.post(
             "/api/v1/admin/api-keys",
-            json={"client_id": "list_test", "name": "Key1"},
+            json={"client_id": "no-such-client", "name": "Key"},
+            headers=admin_headers,
         )
+        assert resp.status_code == 404
 
-        resp = await client.get("/api/v1/admin/api-keys")
+    @pytest.mark.asyncio
+    async def test_list_api_keys(self, client, admin_headers):
+        resp = await client.get("/api/v1/admin/api-keys", headers=admin_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) >= 1
 
     @pytest.mark.asyncio
-    async def test_revoke_api_key(self, client):
+    async def test_revoke_api_key(self, client, admin_headers):
         create_resp = await client.post(
             "/api/v1/admin/api-keys",
-            json={"client_id": "revoke_test"},
+            json={"client_id": TEST_CLIENT_ID},
+            headers=admin_headers,
         )
         key_id = create_resp.json()["id"]
 
-        resp = await client.delete(f"/api/v1/admin/api-keys/{key_id}")
+        resp = await client.delete(f"/api/v1/admin/api-keys/{key_id}", headers=admin_headers)
         assert resp.status_code == 204
 
     @pytest.mark.asyncio
-    async def test_revoke_nonexistent_key(self, client):
+    async def test_revoke_nonexistent_key(self, client, admin_headers):
         fake_id = str(uuid.uuid4())
-        resp = await client.delete(f"/api/v1/admin/api-keys/{fake_id}")
+        resp = await client.delete(f"/api/v1/admin/api-keys/{fake_id}", headers=admin_headers)
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_admin_requires_admin_role(self, client, auth_headers):
+        """Member key should be rejected with 403."""
+        resp = await client.get("/api/v1/admin/api-keys", headers=auth_headers)
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Admin Client Endpoints
+# ---------------------------------------------------------------------------
+class TestAdminClientEndpoints:
+    @pytest.mark.asyncio
+    async def test_create_client(self, client, admin_headers):
+        resp = await client.post(
+            "/api/v1/admin/clients",
+            json={"id": "new-client", "name": "New Client", "email": "new@example.com"},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["id"] == "new-client"
+        assert data["is_active"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_duplicate_client(self, client, admin_headers):
+        resp = await client.post(
+            "/api/v1/admin/clients",
+            json={"id": TEST_CLIENT_ID, "name": "Dup", "email": "d@e.com"},
+            headers=admin_headers,
+        )
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_list_clients(self, client, admin_headers):
+        resp = await client.get("/api/v1/admin/clients", headers=admin_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Admin User Endpoints
+# ---------------------------------------------------------------------------
+class TestAdminUserEndpoints:
+    @pytest.mark.asyncio
+    async def test_create_user(self, client, admin_headers):
+        resp = await client.post(
+            "/api/v1/admin/users",
+            json={
+                "email": "newuser@example.com",
+                "password": "securepass123",
+                "client_id": TEST_CLIENT_ID,
+                "name": "New User",
+            },
+            headers=admin_headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["email"] == "newuser@example.com"
+        assert "password" not in data
+
+    @pytest.mark.asyncio
+    async def test_create_user_duplicate_email(self, client, admin_headers):
+        from tests.conftest import TEST_USER_EMAIL
+        resp = await client.post(
+            "/api/v1/admin/users",
+            json={
+                "email": TEST_USER_EMAIL,
+                "password": "securepass123",
+                "client_id": TEST_CLIENT_ID,
+            },
+            headers=admin_headers,
+        )
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_create_user_bad_client(self, client, admin_headers):
+        resp = await client.post(
+            "/api/v1/admin/users",
+            json={
+                "email": "x@y.com",
+                "password": "securepass123",
+                "client_id": "nonexistent",
+            },
+            headers=admin_headers,
+        )
         assert resp.status_code == 404

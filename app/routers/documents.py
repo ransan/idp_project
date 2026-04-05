@@ -1,14 +1,14 @@
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy import func, select, delete as sa_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import get_optional_client
+from app.auth import get_current_client
 from app.config import settings
 from app.database import get_db
-from app.models import APIKey, DocCategory, DocStatus, Document
+from app.models import DocCategory, DocStatus, Document
 from app.schemas import (
     BatchUploadResponse,
     CategoryCount,
@@ -69,16 +69,13 @@ async def _save_file(file: UploadFile) -> tuple[str, str, int]:
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
 async def upload_document(
     file: UploadFile = File(...),
-    client_id: str | None = Query(default=None),
-    request: Request = None,
     db: AsyncSession = Depends(get_db),
-    _auth: APIKey | None = Depends(get_optional_client),
+    client: dict = Depends(get_current_client),
 ):
     _validate_file(file)
     original_name, storage_key, file_size = await _save_file(file)
 
-    # Use authenticated client_id if available, else query param
-    resolved_client_id = getattr(request.state, "client_id", None) or client_id
+    resolved_client_id = client["client_id"]
 
     doc = Document(
         filename=original_name,
@@ -106,10 +103,8 @@ async def upload_document(
 @router.post("/upload/batch", response_model=BatchUploadResponse, status_code=201)
 async def upload_batch(
     files: list[UploadFile] = File(...),
-    client_id: str | None = Query(default=None),
-    request: Request = None,
     db: AsyncSession = Depends(get_db),
-    _auth: APIKey | None = Depends(get_optional_client),
+    client: dict = Depends(get_current_client),
 ):
     if len(files) > settings.MAX_BATCH_SIZE:
         raise HTTPException(
@@ -117,7 +112,7 @@ async def upload_batch(
             detail=f"Too many files. Maximum batch size: {settings.MAX_BATCH_SIZE}",
         )
 
-    resolved_client_id = getattr(request.state, "client_id", None) or client_id
+    resolved_client_id = client["client_id"]
     documents = []
 
     for file in files:
@@ -157,16 +152,11 @@ async def upload_batch(
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
     document_id: uuid.UUID,
-    request: Request = None,
     db: AsyncSession = Depends(get_db),
-    _auth: APIKey | None = Depends(get_optional_client),
+    client: dict = Depends(get_current_client),
 ):
     query = select(Document).where(Document.id == document_id)
-
-    # Scope by client if authenticated
-    auth_client_id = getattr(request.state, "client_id", None) if request else None
-    if auth_client_id:
-        query = query.where(Document.client_id == auth_client_id)
+    query = query.where(Document.client_id == client["client_id"])
 
     result = await db.execute(query)
     doc = result.scalar_one_or_none()
@@ -181,21 +171,13 @@ async def get_document(
 async def list_documents(
     status: str | None = Query(default=None),
     category: str | None = Query(default=None),
-    client_id: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=20, ge=1, le=100),
-    request: Request = None,
     db: AsyncSession = Depends(get_db),
-    _auth: APIKey | None = Depends(get_optional_client),
+    client: dict = Depends(get_current_client),
 ):
     query = select(Document)
-
-    # Scope by authenticated client_id
-    auth_client_id = getattr(request.state, "client_id", None) if request else None
-    if auth_client_id:
-        query = query.where(Document.client_id == auth_client_id)
-    elif client_id:
-        query = query.where(Document.client_id == client_id)
+    query = query.where(Document.client_id == client["client_id"])
 
     if status:
         query = query.where(Document.status == status)
@@ -237,14 +219,11 @@ async def list_documents(
 @router.post("/{document_id}/reprocess", response_model=ReprocessResponse)
 async def reprocess_document(
     document_id: uuid.UUID,
-    request: Request = None,
     db: AsyncSession = Depends(get_db),
-    _auth: APIKey | None = Depends(get_optional_client),
+    client: dict = Depends(get_current_client),
 ):
     query = select(Document).where(Document.id == document_id)
-    auth_client_id = getattr(request.state, "client_id", None) if request else None
-    if auth_client_id:
-        query = query.where(Document.client_id == auth_client_id)
+    query = query.where(Document.client_id == client["client_id"])
 
     result = await db.execute(query)
     doc = result.scalar_one_or_none()
@@ -279,14 +258,11 @@ async def reprocess_document(
 @router.delete("/{document_id}", status_code=204)
 async def delete_document(
     document_id: uuid.UUID,
-    request: Request = None,
     db: AsyncSession = Depends(get_db),
-    _auth: APIKey | None = Depends(get_optional_client),
+    client: dict = Depends(get_current_client),
 ):
     query = select(Document).where(Document.id == document_id)
-    auth_client_id = getattr(request.state, "client_id", None) if request else None
-    if auth_client_id:
-        query = query.where(Document.client_id == auth_client_id)
+    query = query.where(Document.client_id == client["client_id"])
 
     result = await db.execute(query)
     doc = result.scalar_one_or_none()
