@@ -12,6 +12,13 @@ from app.services.pipeline import DocumentPipeline, PipelineError
 
 
 @pytest.fixture
+def mock_storage():
+    with patch("app.services.pipeline.storage") as mock_st:
+        mock_st.get_local_path.return_value = "/tmp/test.pdf"
+        yield mock_st
+
+
+@pytest.fixture
 def mock_parser():
     with patch("app.services.pipeline.DocumentParser") as MockParser:
         parser_instance = MockParser.return_value
@@ -56,7 +63,7 @@ async def doc_in_db(db_session):
 
 class TestDocumentPipeline:
     @pytest.mark.asyncio
-    async def test_full_pipeline_success(self, db_session, doc_in_db, mock_parser, mock_llm):
+    async def test_full_pipeline_success(self, db_session, doc_in_db, mock_storage, mock_parser, mock_llm):
         pipeline = DocumentPipeline()
         pipeline.parser = mock_parser
         pipeline.llm_service = mock_llm
@@ -82,7 +89,7 @@ class TestDocumentPipeline:
         assert doc.processing_time_ms >= 0
 
     @pytest.mark.asyncio
-    async def test_status_progression(self, db_session, doc_in_db, mock_parser, mock_llm):
+    async def test_status_progression(self, db_session, doc_in_db, mock_storage, mock_parser, mock_llm):
         """Document status should progress through uploaded -> parsing -> processing -> completed."""
         statuses_seen = []
 
@@ -111,7 +118,7 @@ class TestDocumentPipeline:
         assert "completed" in status_values
 
     @pytest.mark.asyncio
-    async def test_parser_failure_sets_failed(self, db_session, doc_in_db, mock_llm):
+    async def test_parser_failure_sets_failed(self, db_session, doc_in_db, mock_storage, mock_llm):
         from app.services.parser import ParserError
 
         with patch("app.services.pipeline.DocumentParser") as MockParser:
@@ -133,7 +140,7 @@ class TestDocumentPipeline:
         assert "Corrupted file" in doc.error_message
 
     @pytest.mark.asyncio
-    async def test_llm_failure_sets_failed(self, db_session, doc_in_db, mock_parser):
+    async def test_llm_failure_sets_failed(self, db_session, doc_in_db, mock_storage, mock_parser):
         from app.services.llm import LLMServiceError
 
         with patch("app.services.pipeline.LLMService") as MockLLM:
@@ -162,7 +169,7 @@ class TestDocumentPipeline:
             await pipeline.process_document(fake_id, db_session)
 
     @pytest.mark.asyncio
-    async def test_processing_time_recorded(self, db_session, doc_in_db, mock_parser, mock_llm):
+    async def test_processing_time_recorded(self, db_session, doc_in_db, mock_storage, mock_parser, mock_llm):
         pipeline = DocumentPipeline()
         pipeline.parser = mock_parser
         pipeline.llm_service = mock_llm
@@ -177,7 +184,7 @@ class TestDocumentPipeline:
         assert doc.processing_time_ms >= 0
 
     @pytest.mark.asyncio
-    async def test_all_llm_results_stored(self, db_session, doc_in_db, mock_parser, mock_llm):
+    async def test_all_llm_results_stored(self, db_session, doc_in_db, mock_storage, mock_parser, mock_llm):
         pipeline = DocumentPipeline()
         pipeline.parser = mock_parser
         pipeline.llm_service = mock_llm
@@ -197,7 +204,7 @@ class TestDocumentPipeline:
         assert "Due within 30 days" in doc.flags
 
     @pytest.mark.asyncio
-    async def test_webhook_sent_on_completion(self, db_session, doc_in_db, mock_parser, mock_llm):
+    async def test_webhook_sent_on_completion(self, db_session, doc_in_db, mock_storage, mock_parser, mock_llm):
         # Add webhook config
         wh = WebhookConfig(
             client_id="test_client",
@@ -228,7 +235,7 @@ class TestDocumentPipeline:
 
     @pytest.mark.asyncio
     async def test_webhook_failure_does_not_crash_pipeline(
-        self, db_session, doc_in_db, mock_parser, mock_llm
+        self, db_session, doc_in_db, mock_storage, mock_parser, mock_llm
     ):
         wh = WebhookConfig(
             client_id="test_client",

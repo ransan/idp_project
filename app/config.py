@@ -25,6 +25,16 @@ class Settings(BaseSettings):
     MAX_BATCH_SIZE: int = 20
     ALLOWED_EXTENSIONS: str = "pdf,docx,png,jpg,jpeg,tiff"
 
+    # Storage Backend: "local" or "minio"
+    STORAGE_BACKEND: str = Field(default="local", pattern=r"^(local|minio)$")
+
+    # MinIO (required if STORAGE_BACKEND=minio)
+    MINIO_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "idp-documents"
+    MINIO_SECURE: bool = False
+
     # Webhook
     WEBHOOK_TIMEOUT_SECONDS: int = 30
 

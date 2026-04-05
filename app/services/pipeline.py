@@ -11,6 +11,7 @@ from app.models import DocStatus, Document, WebhookConfig
 from app.schemas import LLMResult
 from app.services.llm import LLMService, LLMServiceError
 from app.services.parser import DocumentParser, ParserError
+from app.services.storage import storage
 
 logger = structlog.get_logger(__name__)
 
@@ -41,8 +42,11 @@ class DocumentPipeline:
             doc.status = DocStatus.PARSING
             await db.commit()
 
-            logger.info("parsing_started", document_id=str(document_id), file=doc.storage_path)
-            parse_result = self.parser.parse(doc.storage_path, doc.mime_type)
+            # Resolve a local file path (downloads from MinIO if needed)
+            local_path = storage.get_local_path(doc.storage_path)
+
+            logger.info("parsing_started", document_id=str(document_id), file=local_path)
+            parse_result = self.parser.parse(local_path, doc.mime_type)
 
             doc.raw_text = parse_result.text
             doc.page_count = parse_result.page_count

@@ -1,4 +1,3 @@
-import os
 import uuid
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from app.schemas import (
     StatsResponse,
     StatusCount,
 )
+from app.services.storage import storage
 from app.tasks import process_batch_task, process_document_task
 
 router = APIRouter(prefix="/api/v1/documents", tags=["documents"])
@@ -50,13 +50,7 @@ def _validate_file(file: UploadFile) -> None:
 
 
 async def _save_file(file: UploadFile) -> tuple[str, str, int]:
-    """Save uploaded file to disk. Returns (stored_filename, storage_path, file_size)."""
-    ext = Path(file.filename).suffix if file.filename else ""
-    stored_name = f"{uuid.uuid4()}{ext}"
-    upload_dir = Path(settings.UPLOAD_DIR)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    storage_path = str(upload_dir / stored_name)
-
+    """Save uploaded file to storage backend. Returns (original_ext_name, storage_key, file_size)."""
     content = await file.read()
     file_size = len(content)
 
@@ -66,10 +60,10 @@ async def _save_file(file: UploadFile) -> tuple[str, str, int]:
             detail=f"File too large. Maximum size: {settings.MAX_FILE_SIZE_MB}MB",
         )
 
-    with open(storage_path, "wb") as f:
-        f.write(content)
+    filename = file.filename or f"{uuid.uuid4()}"
+    storage_key = storage.save(content, filename)
 
-    return stored_name, storage_path, file_size
+    return filename, storage_key, file_size
 
 
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
@@ -81,17 +75,17 @@ async def upload_document(
     _auth: APIKey | None = Depends(get_optional_client),
 ):
     _validate_file(file)
-    stored_name, storage_path, file_size = await _save_file(file)
+    original_name, storage_key, file_size = await _save_file(file)
 
     # Use authenticated client_id if available, else query param
     resolved_client_id = getattr(request.state, "client_id", None) or client_id
 
     doc = Document(
-        filename=stored_name,
-        original_name=file.filename or stored_name,
+        filename=original_name,
+        original_name=file.filename or original_name,
         file_size=file_size,
         mime_type=file.content_type,
-        storage_path=storage_path,
+        storage_path=storage_key,
         client_id=resolved_client_id,
     )
     db.add(doc)
@@ -128,14 +122,14 @@ async def upload_batch(
 
     for file in files:
         _validate_file(file)
-        stored_name, storage_path, file_size = await _save_file(file)
+        original_name, storage_key, file_size = await _save_file(file)
 
         doc = Document(
-            filename=stored_name,
-            original_name=file.filename or stored_name,
+            filename=original_name,
+            original_name=file.filename or original_name,
             file_size=file_size,
             mime_type=file.content_type,
-            storage_path=storage_path,
+            storage_path=storage_key,
             client_id=resolved_client_id,
         )
         db.add(doc)
@@ -300,9 +294,12 @@ async def delete_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
 
-    # Delete file from disk
-    if doc.storage_path and os.path.exists(doc.storage_path):
-        os.remove(doc.storage_path)
+    # Delete file from storage backend
+    if doc.storage_path:
+        try:
+            storage.delete(doc.storage_path)
+        except Exception:
+            pass  # Don't fail deletion if storage cleanup fails
 
     await db.execute(sa_delete(Document).where(Document.id == document_id))
 
