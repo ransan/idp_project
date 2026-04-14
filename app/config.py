@@ -10,10 +10,14 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     # LLM Provider
-    LLM_PROVIDER: str = Field(default="claude", pattern=r"^(claude|ollama)$")
+    LLM_PROVIDER: str = Field(default="claude", pattern=r"^(claude|ollama|groq)$")
 
     # Anthropic
     ANTHROPIC_API_KEY: str = ""
+
+    # Groq
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -25,8 +29,8 @@ class Settings(BaseSettings):
     MAX_BATCH_SIZE: int = 20
     ALLOWED_EXTENSIONS: str = "pdf,docx,png,jpg,jpeg,tiff"
 
-    # Storage Backend: "local" or "minio"
-    STORAGE_BACKEND: str = Field(default="local", pattern=r"^(local|minio)$")
+    # Storage Backend: "local", "minio", or "b2"
+    STORAGE_BACKEND: str = Field(default="local", pattern=r"^(local|minio|b2)$")
 
     # MinIO (required if STORAGE_BACKEND=minio)
     MINIO_ENDPOINT: str = "localhost:9000"
@@ -34,6 +38,13 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "idp-documents"
     MINIO_SECURE: bool = False
+
+    # Backblaze B2 (required if STORAGE_BACKEND=b2)
+    B2_KEY_ID: str = ""
+    B2_APPLICATION_KEY: str = ""
+    B2_BUCKET: str = "IDP-B01"
+    B2_ENDPOINT: str = "s3.us-east-005.backblazeb2.com"
+    B2_SECURE: bool = True
 
     # JWT Authentication
     JWT_SECRET_KEY: str = "change-me-in-production-use-a-long-random-string"

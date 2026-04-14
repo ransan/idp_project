@@ -215,6 +215,22 @@ class RefreshRequest(BaseModel):
     refresh_token: str
 
 
+class SignupRequest(BaseModel):
+    client_name: str = Field(..., min_length=1, max_length=256)
+    email: str = Field(..., max_length=256)
+    password: str = Field(..., min_length=8, max_length=128)
+    name: str | None = None
+
+
+class SignupResponse(BaseModel):
+    user: UserResponse
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    client_id: str
+
+
 # ---------- LLM Result (internal) ----------
 class LLMResult(BaseModel):
     category: str = "unknown"

@@ -12,6 +12,19 @@ from app.config import settings
 
 logger = structlog.get_logger(__name__)
 
+_CONTENT_TYPE_MAP = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".tiff": "image/tiff",
+}
+
+
+def _guess_content_type(ext: str) -> str:
+    return _CONTENT_TYPE_MAP.get(ext.lower(), "application/octet-stream")
+
 
 class StorageError(Exception):
     pass
@@ -160,20 +173,108 @@ class MinIOStorageBackend(StorageBackend):
 
     @staticmethod
     def _guess_content_type(ext: str) -> str:
-        mapping = {
-            ".pdf": "application/pdf",
-            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            ".png": "image/png",
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".tiff": "image/tiff",
-        }
-        return mapping.get(ext.lower(), "application/octet-stream")
+        return _guess_content_type(ext)
+
+
+class BackblazeB2StorageBackend(StorageBackend):
+    def __init__(
+        self,
+        endpoint: str | None = None,
+        key_id: str | None = None,
+        application_key: str | None = None,
+        bucket: str | None = None,
+        secure: bool | None = None,
+    ):
+        self.endpoint = endpoint or settings.B2_ENDPOINT
+        self.key_id = key_id or settings.B2_KEY_ID
+        self.application_key = application_key or settings.B2_APPLICATION_KEY
+        self.bucket = bucket or settings.B2_BUCKET
+        self.secure = secure if secure is not None else settings.B2_SECURE
+
+        self.client = Minio(
+            self.endpoint,
+            access_key=self.key_id,
+            secret_key=self.application_key,
+            secure=self.secure,
+        )
+
+        self._verify_bucket()
+
+        # Temp dir for parser file access
+        self._temp_dir = Path(settings.UPLOAD_DIR) / ".b2_temp"
+        self._temp_dir.mkdir(parents=True, exist_ok=True)
+
+    def _verify_bucket(self) -> None:
+        try:
+            if not self.client.bucket_exists(self.bucket):
+                raise StorageError(
+                    f"B2 bucket '{self.bucket}' does not exist. "
+                    "Create it in the Backblaze B2 console first."
+                )
+            logger.info("b2_bucket_verified", bucket=self.bucket)
+        except S3Error as e:
+            raise StorageError(f"Failed to verify B2 bucket: {e}") from e
+
+    def save(self, content: bytes, filename: str) -> str:
+        ext = Path(filename).suffix
+        object_name = f"{uuid.uuid4()}{ext}"
+
+        try:
+            self.client.put_object(
+                self.bucket,
+                object_name,
+                io.BytesIO(content),
+                length=len(content),
+                content_type=_guess_content_type(ext),
+            )
+        except S3Error as e:
+            raise StorageError(f"Failed to upload to B2: {e}") from e
+
+        logger.info(
+            "file_saved_b2",
+            bucket=self.bucket,
+            object=object_name,
+            size=len(content),
+        )
+        return object_name
+
+    def get(self, storage_path: str) -> bytes:
+        try:
+            response = self.client.get_object(self.bucket, storage_path)
+            data = response.read()
+            response.close()
+            response.release_conn()
+            return data
+        except S3Error as e:
+            raise StorageError(f"Failed to retrieve from B2: {e}") from e
+
+    def delete(self, storage_path: str) -> None:
+        try:
+            self.client.remove_object(self.bucket, storage_path)
+            logger.info("file_deleted_b2", bucket=self.bucket, object=storage_path)
+        except S3Error as e:
+            raise StorageError(f"Failed to delete from B2: {e}") from e
+
+        # Clean up any temp file
+        temp_path = self._temp_dir / storage_path
+        if temp_path.exists():
+            temp_path.unlink()
+
+    def get_local_path(self, storage_path: str) -> str:
+        temp_path = self._temp_dir / storage_path
+        if not temp_path.exists():
+            content = self.get(storage_path)
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(temp_path, "wb") as f:
+                f.write(content)
+        return str(temp_path)
 
 
 def get_storage_backend() -> StorageBackend:
     if settings.STORAGE_BACKEND == "minio":
         return MinIOStorageBackend()
+    if settings.STORAGE_BACKEND == "b2":
+        return BackblazeB2StorageBackend()
     return LocalStorageBackend()
 
 

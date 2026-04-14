@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import DocStatus, Document, WebhookConfig
 from app.schemas import LLMResult
 from app.services.llm import LLMService, LLMServiceError
+from app.services.notifications import publish_document_update
 from app.services.parser import DocumentParser, ParserError
 from app.services.storage import storage
 
@@ -24,6 +25,15 @@ class DocumentPipeline:
     def __init__(self):
         self.parser = DocumentParser()
         self.llm_service = LLMService()
+
+    @staticmethod
+    def _notify(doc: Document) -> None:
+        if doc.client_id:
+            publish_document_update(doc.client_id, {
+                "document_id": str(doc.id),
+                "status": doc.status.value if isinstance(doc.status, DocStatus) else doc.status,
+                "original_name": doc.original_name,
+            })
 
     async def process_document(self, document_id: UUID, db: AsyncSession) -> None:
         start_time = time.monotonic()
@@ -41,6 +51,7 @@ class DocumentPipeline:
             # --- Stage 1: Parse ---
             doc.status = DocStatus.PARSING
             await db.commit()
+            self._notify(doc)
 
             # Resolve a local file path (downloads from MinIO if needed)
             local_path = storage.get_local_path(doc.storage_path)
@@ -55,6 +66,7 @@ class DocumentPipeline:
             # --- Stage 2: LLM Analysis ---
             doc.status = DocStatus.PROCESSING
             await db.commit()
+            self._notify(doc)
 
             logger.info("llm_processing_started", document_id=str(document_id))
             llm_result: LLMResult = self.llm_service.analyze_document(parse_result.text)
@@ -73,6 +85,7 @@ class DocumentPipeline:
             doc.processed_at = datetime.now(timezone.utc)
             doc.processing_time_ms = elapsed_ms
             await db.commit()
+            self._notify(doc)
 
             logger.info(
                 "processing_completed",
@@ -89,6 +102,7 @@ class DocumentPipeline:
             doc.status = DocStatus.FAILED
             doc.error_message = str(e)
             await db.commit()
+            self._notify(doc)
             logger.error(
                 "processing_failed",
                 document_id=str(document_id),
@@ -102,6 +116,7 @@ class DocumentPipeline:
             doc.status = DocStatus.FAILED
             doc.error_message = f"Unexpected error: {e}"
             await db.commit()
+            self._notify(doc)
             logger.error(
                 "processing_unexpected_error",
                 document_id=str(document_id),

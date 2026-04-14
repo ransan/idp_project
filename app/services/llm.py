@@ -2,6 +2,7 @@ import json
 import re
 
 import anthropic
+import groq
 import ollama as ollama_client
 import structlog
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -52,6 +53,8 @@ class LLMService:
         self.provider = settings.LLM_PROVIDER
         if self.provider == "claude":
             self._claude_client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        elif self.provider == "groq":
+            self._groq_client = groq.Groq(api_key=settings.GROQ_API_KEY)
         elif self.provider == "ollama":
             self._ollama_client = ollama_client.Client(host=settings.OLLAMA_BASE_URL)
 
@@ -69,6 +72,23 @@ class LLMService:
             messages=[{"role": "user", "content": f"Analyze this document:\n\n{text}"}],
         )
         return message.content[0].text
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((groq.APITimeoutError, groq.RateLimitError)),
+        reraise=True,
+    )
+    def _call_groq(self, text: str) -> str:
+        response = self._groq_client.chat.completions.create(
+            model=settings.GROQ_MODEL,
+            max_tokens=4096,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Analyze this document:\n\n{text}"},
+            ],
+        )
+        return response.choices[0].message.content
 
     @retry(
         stop=stop_after_attempt(3),
@@ -99,6 +119,8 @@ class LLMService:
         try:
             if self.provider == "claude":
                 raw = self._call_claude(truncated_text)
+            elif self.provider == "groq":
+                raw = self._call_groq(truncated_text)
             else:
                 raw = self._call_ollama(truncated_text)
         except Exception as e:

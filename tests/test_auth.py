@@ -207,3 +207,117 @@ class TestRBAC:
     async def test_no_auth_cannot_access_admin_routes(self, client):
         resp = await client.get("/api/v1/admin/api-keys")
         assert resp.status_code == 401
+
+
+class TestSignup:
+    @pytest.mark.asyncio
+    async def test_signup_success(self, client):
+        resp = await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Acme Corp",
+                "email": "newuser@acme.com",
+                "password": "securepass123",
+                "name": "John Doe",
+            },
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["client_id"] == "acme-corp"
+        assert "access_token" in data
+        assert "refresh_token" in data
+        assert data["user"]["email"] == "newuser@acme.com"
+        assert data["user"]["role"] == "admin"
+        assert data["user"]["client_id"] == "acme-corp"
+
+    @pytest.mark.asyncio
+    async def test_signup_then_login(self, client):
+        # Signup
+        await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Login Test Co",
+                "email": "login@test.com",
+                "password": "mypassword99",
+            },
+        )
+        # Login with same credentials
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "login@test.com", "password": "mypassword99"},
+        )
+        assert resp.status_code == 200
+        assert "access_token" in resp.json()
+
+    @pytest.mark.asyncio
+    async def test_signup_token_works_for_upload(self, client):
+        resp = await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Upload Test",
+                "email": "upload@test.com",
+                "password": "securepass1",
+            },
+        )
+        token = resp.json()["access_token"]
+
+        # Use token to list documents
+        docs_resp = await client.get(
+            "/api/v1/documents/",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert docs_resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_signup_duplicate_email(self, client):
+        await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "First Co",
+                "email": "dup@test.com",
+                "password": "password123",
+            },
+        )
+        resp = await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Second Co",
+                "email": "dup@test.com",
+                "password": "password456",
+            },
+        )
+        assert resp.status_code == 409
+        assert "Email already registered" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_signup_duplicate_client_name(self, client):
+        await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Same Name",
+                "email": "first@test.com",
+                "password": "password123",
+            },
+        )
+        resp = await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Same Name",
+                "email": "second@test.com",
+                "password": "password456",
+            },
+        )
+        assert resp.status_code == 409
+        assert "Client name already taken" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_signup_short_password(self, client):
+        resp = await client.post(
+            "/api/v1/auth/signup",
+            json={
+                "client_name": "Short PW",
+                "email": "short@test.com",
+                "password": "abc",
+            },
+        )
+        assert resp.status_code == 422
